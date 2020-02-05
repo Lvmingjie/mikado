@@ -166,7 +166,7 @@ class Assigner:
             self.tmap_rower.writeheader()
             self.db, self._connection, self._cursor = [None] * 3
         else:
-            self.db = tempfile.NamedTemporaryFile(prefix=".compare", suffix=".db", dir=".", delete=False)
+            self.db = tempfile.NamedTemporaryFile(prefix=".compare", suffix=".db", delete=False)
             self.db.close()
             self._connection = sqlite3.connect(self.db.name)
             self._cursor = self._connection.cursor()

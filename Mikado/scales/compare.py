@@ -577,7 +577,7 @@ def parse_prediction(args, index, queue_logger):
     __found_with_orf = set()
     queue = mp.JoinableQueue(-1)
     returnqueue = mp.JoinableQueue(-1)
-    dump_dbhandle = tempfile.NamedTemporaryFile(delete=True, prefix=".compare_dump", suffix=".db", dir=".")
+    dump_dbhandle = tempfile.NamedTemporaryFile(delete=True, prefix=".compare_dump", suffix=".db")
     dump_db = sqlite3.connect(dump_dbhandle.name, check_same_thread=False, timeout=60)
     dump_db.execute("CREATE TABLE dump (idx INTEGER, json BLOB)")
     dump_db.execute("PRAGMA journal_mode=WAL")

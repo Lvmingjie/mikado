@@ -23,6 +23,7 @@ try:
 except ImportError:
     import json
 import multiprocessing as mp
+import diskcache
 
 
 __author__ = 'Luca Venturini'

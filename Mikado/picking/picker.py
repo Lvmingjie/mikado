@@ -728,7 +728,7 @@ Please update your configuration files in the future.""".format(
         if self.json_conf["pick"]["run_options"]["shm"] is True:
             basetempdir = "/dev/shm"
         else:
-            basetempdir = self.json_conf["pick"]["files"]["output_dir"]
+            basetempdir = None  # self.json_conf["pick"]["files"]["output_dir"]
 
         tempdirectory = tempfile.TemporaryDirectory(suffix="",
                                                     prefix="mikado_pick_tmp",

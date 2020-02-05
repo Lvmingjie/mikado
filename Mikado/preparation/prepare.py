@@ -459,7 +459,7 @@ def prepare(args, logger):
         log_queue_handler = logging.handlers.QueueHandler(args.logging_queue)
         log_queue_handler.setLevel(logging.DEBUG)
         # logger.addHandler(log_queue_handler)
-        args.tempdir = tempfile.TemporaryDirectory(dir=args.json_conf["prepare"]["files"]["output_dir"])
+        args.tempdir = tempfile.TemporaryDirectory(dir=None)  # args.json_conf["prepare"]["files"]["output_dir"])
         args.listener = logging.handlers.QueueListener(args.logging_queue, logger)
         args.listener.propagate = False
         args.listener.start()
