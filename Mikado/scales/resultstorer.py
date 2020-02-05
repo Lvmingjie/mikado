@@ -34,7 +34,6 @@ def _tupling(obj, final_type):
         raise TypeError(type(obj))
 
 
-
 class ResultStorer:
     """This class stores the results in pre-defined slots, to reduce memory usage."""
 

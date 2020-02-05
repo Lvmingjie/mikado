@@ -15,6 +15,7 @@ import re
 import sys
 from logging import handlers as log_handlers
 from ..transcripts.transcript import Transcript
+from argparse import Namespace
 from .assigner import Assigner
 from .resultstorer import ResultStorer
 from ..exceptions import CorruptIndex
@@ -253,43 +254,51 @@ class Assigners(mp.Process):
 
     def __init__(self, index, args, queue, returnqueue, counter, dump_dbname):
         super().__init__()
-        self.__connection = sqlite3.connect(dump_dbname, timeout=600)
-        self.__cursor = self.__connection.cursor()
-
-        # self.accountant_instance = Accountant(genes, args, counter=counter)
+        self._dump_db = dump_dbname
+        assert os.path.exists(dump_dbname)
         if hasattr(args, "fuzzymatch"):
             self.__fuzzymatch = args.fuzzymatch
         else:
             self.__fuzzymatch = 0
 
-        self.assigner_instance = Assigner(index, args,
-                                          printout_tmap=False,
-                                          counter=counter,
-                                          fuzzymatch=self.__fuzzymatch)
-
         self.queue = queue
         self.returnqueue = returnqueue
         self.__args = args
         self.__counter = counter
+        self.__index = index
 
     def run(self):
+        assigner_instance = Assigner(self.__index, args=self.__args,
+                                          printout_tmap=False,
+                                          counter=self.__counter,
+                                          fuzzymatch=self.__fuzzymatch)
+
+
+        __connection = sqlite3.connect(self._dump_db, timeout=600, check_same_thread=False)
+        __cursor = __connection.cursor()
+
         while True:
             transcr = self.queue.get()
             #
             if transcr == "EXIT":
                 self.queue.put_nowait("EXIT")
                 # out = os.path.join(self.__args.out + str(self.__counter) + ".pickle")
-                self.assigner_instance.dump()
-                self.returnqueue.put(self.assigner_instance.db.name)
+                assigner_instance.dump()
+                self.returnqueue.put(assigner_instance.db.name)
                 break
             else:
-                dumped = self.__cursor.execute("SELECT json FROM dump WHERE idx=?", (transcr,)).fetchone()
+                try:
+                    dumped = __cursor.execute("SELECT json FROM dump WHERE idx=?", (transcr,)).fetchone()
+                except sqlite3.OperationalError:
+                    if not os.path.exists(self._dump_db):
+                        raise OSError("Dump database {} does not exists".format(self._dump_db))
+                    raise sqlite3.OperationalError("Could not connect to database: {}".format(self._dump_db))
                 dumped = json.loads(dumped[0])
                 transcr = Transcript()
                 transcr.load_dict(dumped, trust_orf=True, accept_undefined_multi=True)
-                self.assigner_instance.get_best(transcr)
+                assigner_instance.get_best(transcr)
 
-        self.__connection.close()
+        __connection.close()
 
 
 class FinalAssigner(mp.Process):
@@ -301,13 +310,13 @@ class FinalAssigner(mp.Process):
         self.queue = queue
 
     def run(self):
-        self.assigner = Assigner(self.index, self.args, printout_tmap=True)
+        assigner = Assigner(self.index, args=self.args, printout_tmap=True)
         while True:
             dbname = self.queue.get()
             if dbname == "EXIT":
                 break
-            self.assigner.load_result(dbname)
-        self.assigner.finish()
+            assigner.load_result(dbname)
+        assigner.finish()
 
 
 def transmit_transcript(index, transcript: Transcript, connection: sqlite3.Connection):
@@ -577,7 +586,7 @@ def parse_prediction(args, index, queue_logger):
     __found_with_orf = set()
     queue = mp.JoinableQueue(-1)
     returnqueue = mp.JoinableQueue(-1)
-    dump_dbhandle = tempfile.NamedTemporaryFile(delete=True, prefix=".compare_dump", suffix=".db")
+    dump_dbhandle = tempfile.NamedTemporaryFile(delete=False, prefix="compare_dump", suffix=".db")
     dump_db = sqlite3.connect(dump_dbhandle.name, check_same_thread=False, timeout=60)
     dump_db.execute("CREATE TABLE dump (idx INTEGER, json BLOB)")
     dump_db.execute("PRAGMA journal_mode=WAL")
@@ -585,10 +594,18 @@ def parse_prediction(args, index, queue_logger):
     dump_db.commit()
 
     queue_logger.info("Starting to parse the prediction")
+    assert isinstance(index, str)
     if args.processes > 1:
-        procs = [Assigners(index, args, queue, returnqueue, counter, dump_dbhandle.name)
-                            for counter in range(1, args.processes)]
-        final_proc = FinalAssigner(index, args, returnqueue)
+        args_copy = Namespace()
+        for name, val in args.__dict__.items():
+            if name in ("prediction", "reference", "queue_handler"):
+                args_copy.__setattr__(name, None)
+            else:
+                args_copy.__setattr__(name, val)
+
+        procs = [Assigners(index, args_copy, queue, returnqueue, counter, dump_dbhandle.name)
+                 for counter in range(1, args.processes)]
+        final_proc = FinalAssigner(index, args_copy, returnqueue)
         [proc.start() for proc in procs]
         final_proc.start()
         transmitter = functools.partial(transmit_transcript, connection=dump_db)
@@ -626,7 +643,7 @@ def parse_prediction(args, index, queue_logger):
         [queue.put(_) for _ in range(lastdone, done + 1)]
     queue_logger.info("Finished parsing, %s transcripts in total", done)
     dump_dbhandle.close()
-    if assigner_instance is None:
+    if args.processes > 1:
         queue.put("EXIT")
         [proc.join() for proc in procs]
         returnqueue.put("EXIT")
@@ -637,6 +654,7 @@ def parse_prediction(args, index, queue_logger):
         assert isinstance(assigner_instance, Assigner)
         assigner_instance.finish()
     queue.close()
+    os.remove(dump_dbhandle.name)
 
 
 def parse_self(args, gdict: GeneDict, queue_logger):
@@ -750,7 +768,7 @@ def create_index(reference, queue_logger, index_name, ref_gff=False,
 
     conn = sqlite3.connect(temp_db)
     cursor = conn.cursor()
-    conn.execute("PRAGMA synchronous=EXTRA")
+    conn.execute("PRAGMA synchronous=OFF")
     conn.execute("PRAGMA journal_mode=WAL")
     cursor.execute("CREATE TABLE positions (chrom text, start integer, end integer, gid text)")
     genes, positions = prepare_reference(reference, queue_logger, ref_gff=ref_gff,

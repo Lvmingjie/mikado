@@ -124,7 +124,11 @@ class Assigner:
 
         # noinspection PyUnresolvedReferences
         # pylint: disable=no-member
-        self.queue_handler = log_handlers.QueueHandler(self.args.log_queue)
+        try:
+            self.queue_handler = log_handlers.QueueHandler(self.args.log_queue)
+        except AttributeError:
+            self.args.log_queue = queue.Queue()
+            self.queue_handler =  log_handlers.QueueHandler(self.args.log_queue)
 
         # pylint: enable=no-member
         if counter is None:
@@ -133,7 +137,7 @@ class Assigner:
             self.logger = logging.getLogger("Assigner-{}".format(counter))
         self.logger.addHandler(self.queue_handler)
         # noinspection PyUnresolvedReferences
-        if args.verbose:
+        if self.args.verbose:
             self.logger.setLevel(logging.DEBUG)
         else:
             self.logger.setLevel(logging.INFO)
@@ -168,9 +172,15 @@ class Assigner:
         else:
             self.db = tempfile.NamedTemporaryFile(prefix=".compare", suffix=".db", delete=False)
             self.db.close()
-            self._connection = sqlite3.connect(self.db.name)
-            self._cursor = self._connection.cursor()
-            self._cursor.execute("CREATE TABLE tmap (row blob)")
+            self._connection = sqlite3.connect(self.db.name,
+                                               isolation_level="EXCLUSIVE",
+                                               check_same_thread=True)
+            # self._cursor = self._connection.cursor()
+            self._connection.executescript("""
+            CREATE TABLE tmap (row blob);
+            CREATE TABLE gene_matches (gid varchar(100), match blob);
+            CREATE TABLE stats (level varchar(40), stats blob)
+            """)
 
         self.gene_matches = collections.defaultdict(dict)
         self.done = 0
@@ -242,21 +252,18 @@ class Assigner:
 
         """Method to dump all results into the database"""
 
-        assert self._cursor is not None
+        assert self._connection is not None
         self._connection.commit()
 
-        self._cursor.execute("CREATE TABLE gene_matches (gid varchar(100), match blob)")
-        self._connection.commit()
-        self._cursor.executemany("INSERT INTO gene_matches ('gid', 'match') VALUES (?, ?)",
-                                 [(gid, msgpack.dumps(self.gene_matches[gid],
-                                                   default=msgpack_default, strict_types=True)) for gid in self.gene_matches])
-        self._connection.commit()
-        self._cursor.execute("CREATE TABLE stats (level varchar(40), stats blob)")
-        self._connection.commit()
+        self._connection.executemany(
+            "INSERT INTO gene_matches ('gid', 'match') VALUES (?, ?)",
+            [(gid, msgpack.dumps(self.gene_matches[gid],
+                                 default=msgpack_default, strict_types=True)) for gid in self.gene_matches])
         simplified = self.stat_calculator.serialize()
         for attribute in simplified.attributes:
-            self._cursor.execute("INSERT INTO stats VALUES (?, ?)", (attribute,
-                                                                     msgpack.dumps(getattr(simplified, attribute), default=msgpack_default, strict_types=True)))
+            self._connection.execute("INSERT INTO stats VALUES (?, ?)",
+                                 (attribute,
+                                 msgpack.dumps(getattr(simplified, attribute), default=msgpack_default, strict_types=True)))
         self._connection.commit()
         self._connection.close()
 
@@ -491,7 +498,7 @@ class Assigner:
         # Finally add the results
         for gene in new_matches:
             results.extend(new_matches[gene])
-        self.logger.debug("\n".join([str(result) for result in results]))
+        # self.logger.debug("\n".join([str(result) for result in results]))
 
         return results, best_result
 
@@ -862,8 +869,8 @@ class Assigner:
                 raise ValueError
             else:
                 if self.printout_tmap is False:
-                    self._cursor.execute("INSERT INTO tmap VALUES (?)",
-                                         (msgpack.dumps(res, strict_types=True, default=msgpack_default), ))
+                    self._connection.execute("INSERT INTO tmap VALUES (?)",
+                                             (msgpack.dumps(res, strict_types=True, default=msgpack_default), ))
                     self.__done += 1
                     if self.__done % 10000 == 0 and self.__done > 10000:
                         self._connection.commit()

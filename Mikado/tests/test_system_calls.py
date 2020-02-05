@@ -883,17 +883,20 @@ class CompareCheck(unittest.TestCase):
                  "trinity.bed12"]
         files = [pkg_resources.resource_filename("Mikado.tests", filename) for filename in files]
         bam = pkg_resources.resource_filename("Mikado.tests", "trinity.minimap2.bam")
+        # files.append(bam)
 
         namespace = Namespace(default=False)
         namespace.distance = 2000
         namespace.no_save_index = True
+        namespace.processes = 2
+        namespace.gzip = False
+        namespace.extended_refmap = False
 
         for ref, pred in itertools.chain(itertools.permutations(files, 2),
                                          [(ref, bam) for ref in files]):
             with self.subTest(ref=ref, pred=pred):
                 namespace.reference = to_gff(ref)
                 namespace.prediction = to_gff(pred)
-                namespace.processes = 2
                 dir = tempfile.TemporaryDirectory()
                 if pred != bam:
                     namespace.log = os.path.join(dir.name, "compare_{}_{}.log".format(
@@ -905,6 +908,7 @@ class CompareCheck(unittest.TestCase):
                         files.index(ref), len(files) + 1))
                     namespace.out = os.path.join(dir.name, "compare_{}_{}".format(
                         files.index(ref), len(files) + 1))
+
                 compare(namespace)
                 sleep(0.1)
                 refmap = "{}.refmap".format(namespace.out)
@@ -928,12 +932,13 @@ class CompareCheck(unittest.TestCase):
                                           ("_", "=", "f,_", "f,="),
                                           (ref, pred, line))
                     self.assertEqual(counter, 38)
-                if pred == bam:
-                    with open(tmap) as _:
-                        reader = csv.DictReader(_, delimiter="\t")
-                        for counter, line in enumerate(reader, start=1):
-                            pass
-                    self.assertEqual(counter, 38)
+                with open(tmap) as _:
+                    reader = csv.DictReader(_, delimiter="\t")
+                    import collections
+                    data = collections.defaultdict(list)
+                    for counter, line in enumerate(reader, start=1):
+                        data[line["tid"]].append(line["ccode"])
+                    self.assertEqual(len(data), 38)
 
                 dir.cleanup()
 
@@ -950,7 +955,7 @@ class CompareCheck(unittest.TestCase):
             namespace.reference = to_gff(problematic)
             namespace.prediction = to_gff(problematic)
             namespace.processes = proc
-            dir = "/tmp/"
+            dir = tempfile.gettempdir()
             namespace.log = os.path.join(dir, "compare_problematic_{proc}.log".format(proc=proc))
             namespace.out = os.path.join(dir, "compare_problematic_{proc}".format(proc=proc))
             compare(namespace)
@@ -970,14 +975,13 @@ class CompareCheck(unittest.TestCase):
                 reader = csv.DictReader(_, delimiter="\t")
                 for counter, line in enumerate(reader, start=1):
                     ccode = line["ccode"]
-                    self.assertIn(ccode, ("_", "=", "f,_", "f,="), line)
+                    self.assertIn(ccode, ("_", "=", "f,_", "f,="), log)
                 self.assertEqual(counter, 4)
             with open(tmap) as _:
                 reader = csv.DictReader(_, delimiter="\t")
                 for counter, line in enumerate(reader, start=1):
                     pass
             self.assertEqual(counter, 4)
-
 
 
 class ConfigureCheck(unittest.TestCase):
