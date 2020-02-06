@@ -1448,6 +1448,7 @@ class Bed12ParseWrapper(mp.Process):
     def __init__(self,
                  rec_queue=None,
                  return_queue=None,
+                 cache=None,
                  log_queue=None,
                  level="DEBUG",
                  fasta_index=None,
@@ -1480,6 +1481,7 @@ class Bed12ParseWrapper(mp.Process):
         self._max_regression = max_regression
         self.coding = coding
         self.start_adjustment = start_adjustment
+        self.cache = cache
 
         if isinstance(fasta_index, dict):
             # check that this is a bona fide dictionary ...
@@ -1546,9 +1548,12 @@ class Bed12ParseWrapper(mp.Process):
                 self.return_queue.put(b"FINISHED")
                 break
             try:
+                num, line = line
                 line = line.decode()
             except AttributeError:
                 pass
+            except ValueError:
+                raise ValueError(line)
             if not self._is_bed12:
                 row = self.gff_next(line)
             else:
@@ -1561,6 +1566,7 @@ class Bed12ParseWrapper(mp.Process):
                                     row.invalid_reason,
                                     row)
                 continue
-            self.return_queue.put(msgpack.dumps(row.as_simple_dict()))
+            self.cache[num] = msgpack.dumps(row.as_simple_dict())
+            self.return_queue.put(num)
 
         # self.join()
