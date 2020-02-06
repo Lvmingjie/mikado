@@ -19,11 +19,12 @@ from .blast_serializer import Query
 from ..utilities.log_utils import create_null_logger, check_logger
 import pandas as pd
 from ..exceptions import InvalidSerialization
-from ..parsers import Parser
 import logging
 import logging.handlers as logging_handlers
 import multiprocessing as mp
 import msgpack
+import diskcache
+from shutil import rmtree
 
 
 # This is a serialization class, it must have a ton of attributes ...
@@ -371,6 +372,7 @@ Please check your input files.")
 
         parsers = [bed12.Bed12ParseWrapper(
             rec_queue=send_queue,
+            cache=self.cache,
             log_queue=self.logging_queue,
             level=self.log_level,
             return_queue=return_queue,
@@ -382,34 +384,41 @@ Please check your input files.")
 
         [_.start() for _ in parsers]
 
-        for line in open(self._handle):
-            send_queue.put(line.encode())
-        send_queue.put("EXIT")
+        def line_parser_func(handle, send_queue, cache):
+            for num, line in enumerate(open(handle)):
+                cache[num] = line
+                send_queue.put(num)
+            send_queue.put("EXIT")
+
+        line_parser = mp.Process(target=line_parser_func,
+                                 args=(self._handle, send_queue, self.cache))
+        line_parser.start()
+
         not_found = set()
         done = 0
         objects = []
         procs_done = 0
         while True:
-            object = return_queue.get()
-            if object in ("FINISHED", b"FINISHED"):
+            num = return_queue.get()
+            if num in ("FINISHED", b"FINISHED"):
                 procs_done += 1
                 if procs_done == self.procs:
                     break
                 else:
                     continue
             try:
-                object = msgpack.loads(object, raw=False)
+                object = msgpack.loads(self.cache[num], raw=False)
             except TypeError:
-                raise TypeError(object)
+                raise TypeError(self.cache[num])
 
-            if object["id"] in self.cache:
-                current_query = self.cache[object["id"]]
+            if object["id"] in self.query_cache:
+                current_query = self.query_cache[object["id"]]
             elif not self.initial_cache:
                 current_query = Query(object["id"], object["end"])
                 not_found.add(object["id"])
                 self.session.add(current_query)
                 self.session.commit()
-                self.cache[current_query.query_name] = current_query.query_id
+                self.query_cache[current_query.query_name] = current_query.query_id
                 current_query = current_query.query_id
             else:
                 self.logger.critical(
@@ -459,8 +468,10 @@ mikado prepare. If this is the case, please use mikado_prepared.fasta to call th
         """
 
         self.load_fasta()
-        self.cache = pd.read_sql_table("query", self.engine, index_col="query_name", columns=["query_name", "query_id"])
-        self.cache = self.cache.to_dict()["query_id"]
+        self.query_cache = pd.read_sql_table("query", self.engine, index_col="query_name", columns=["query_name", "query_id"])
+        self.query_cache = self.query_cache.to_dict()["query_id"]
+        self.cache = diskcache.Cache(timeout=float("inf"), size_limit=2 ** 60,
+                                     cull_limit=0, eviction_policy="none")
         self.initial_cache = (len(self.cache) > 0)
 
         if self.procs == 1:
@@ -481,3 +492,7 @@ mikado prepare. If this is the case, please use mikado_prepared.fasta to call th
             self.session.query(Query).delete()
             self.session.query(Orf).delete()
             self.serialize()
+        except InvalidSerialization:
+            raise
+        finally:
+            rmtree(self.cache.directory)
