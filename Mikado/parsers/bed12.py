@@ -16,7 +16,6 @@ import copy
 from ..parsers.GFF import GffLine
 from typing import Union
 import re
-from ..utilities.log_utils import create_null_logger
 import pysam
 import functools
 from Bio import BiopythonWarning
@@ -28,7 +27,7 @@ import multiprocessing as mp
 import msgpack
 import logging
 import logging.handlers as logging_handlers
-from ..utilities.log_utils import create_default_logger, create_null_logger
+from ..utilities.log_utils import create_null_logger
 
 
 backup_valid_letters = set(_ambiguous_dna_letters.upper() + _ambiguous_rna_letters.upper())
@@ -1542,31 +1541,28 @@ class Bed12ParseWrapper(mp.Process):
 
     def run(self, *args, **kwargs):
         while True:
-            line = self.rec_queue.get()
-            if line in ("EXIT", b"EXIT"):
+            num = self.rec_queue.get()
+            if num in ("EXIT", b"EXIT"):
                 self.rec_queue.put(b"EXIT")
                 self.return_queue.put(b"FINISHED")
                 break
             try:
-                num, line = line
-                line = line.decode()
+                line = self.cache[num]
+                if not self._is_bed12:
+                    row = self.gff_next(line)
+                else:
+                    row = self.bed_next(line)
+
+                if not row or row.header is True:
+                    continue
+                if row.invalid is True:
+                    self.logger.warning("Invalid entry, reason: %s\n%s",
+                                        row.invalid_reason,
+                                        row)
+                    continue
+                self.cache[num] = msgpack.dumps(row.as_simple_dict())
+                self.return_queue.put(num)
             except AttributeError:
                 pass
             except ValueError:
-                raise ValueError(line)
-            if not self._is_bed12:
-                row = self.gff_next(line)
-            else:
-                row = self.bed_next(line)
-
-            if not row or row.header is True:
-                continue
-            if row.invalid is True:
-                self.logger.warning("Invalid entry, reason: %s\n%s",
-                                    row.invalid_reason,
-                                    row)
-                continue
-            self.cache[num] = msgpack.dumps(row.as_simple_dict())
-            self.return_queue.put(num)
-
-        # self.join()
+                raise ValueError(num)

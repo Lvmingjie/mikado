@@ -383,13 +383,14 @@ Please check your input files.")
 
         [_.start() for _ in parsers]
 
-        def line_parser_func(handle, send_queue):
+        def line_parser_func(handle, send_queue, cache):
             for num, line in enumerate(open(handle)):
-                send_queue.put((num, line.encode()))
+                cache[num] = line
+                send_queue.put(num)
             send_queue.put("EXIT")
 
         line_parser = mp.Process(target=line_parser_func,
-                                 args=(self._handle, send_queue))
+                                 args=(self._handle, send_queue, self.cache))
         line_parser.start()
 
         not_found = set()
