@@ -24,6 +24,7 @@ import logging.handlers as logging_handlers
 import multiprocessing as mp
 import msgpack
 import diskcache
+from shutil import rmtree
 
 
 # This is a serialization class, it must have a ton of attributes ...
@@ -493,3 +494,5 @@ mikado prepare. If this is the case, please use mikado_prepared.fasta to call th
             self.serialize()
         except InvalidSerialization:
             raise
+        finally:
+            rmtree(self.cache.directory)
