@@ -5,9 +5,8 @@ XML serialisation class.
 import os
 import logging.handlers as logging_handlers
 import logging
-import tempfile
 import rapidjson as json
-import sqlite3
+from shutil import rmtree
 import sqlalchemy
 import sqlalchemy.exc
 from sqlalchemy.orm.session import Session
@@ -20,6 +19,8 @@ from . import Query, Target, Hsp, Hit, prepare_hit, InvalidHit
 from xml.parsers.expat import ExpatError
 import xml
 import pandas as pd
+import diskcache
+import msgpack
 # from queue import Empty
 import multiprocessing
 
@@ -30,40 +31,49 @@ __author__ = 'Luca Venturini'
 # A serialisation class must have a ton of attributes ...
 # pylint: disable=too-many-instance-attributes
 
+# def _create_xml_db(filename):
+#     """Private method to create a DB for serialisation.
+#     :param filename: the name of the file to serialise
+#     :returns dbname, cursor: the name of the database and the SQLite cursor
+#
+#     """
+#
+#     directory = os.path.dirname(filename)
+#     try:
+#         dbname = tempfile.mktemp(suffix=".db", dir=directory)
+#         conn = sqlite3.connect(dbname,
+#                                isolation_level="DEFERRED",
+#                                timeout=60,
+#                                check_same_thread=False  # Necessary for SQLite3 to function in multiprocessing
+#                                )
+#     except (OSError, PermissionError, sqlite3.OperationalError):
+#         dbname = tempfile.mktemp(suffix=".db")
+#         conn = sqlite3.connect(dbname,
+#                                isolation_level = "DEFERRED",
+#                                timeout = 60,
+#                                check_same_thread = False  # Necessary for SQLite3 to function in multiprocessing
+#         )
+#
+#     cursor = conn.cursor()
+#     creation_string = "CREATE TABLE dump (query_counter integer, hits blob, hsps blob)"
+#     try:
+#         cursor.execute("DROP TABLE IF EXISTS dump")
+#         cursor.execute(creation_string)
+#     except sqlite3.OperationalError:
+#         # Table already exists
+#         cursor.close()
+#         conn.close()
+#         os.remove(dbname)
+#         conn = sqlite3.connect(dbname)
+#         cursor = conn.cursor()
+#         cursor.execute(creation_string)
+#     cursor.execute("CREATE INDEX idx ON dump (query_counter)")
+#     return dbname, conn, cursor
 
-def _create_xml_db(filename):
-    """Private method to create a DB for serialisation.
-    :param filename: the name of the file to serialise
-    :returns dbname, cursor: the name of the database and the SQLite cursor
 
-    """
-
-    dbname = tempfile.mktemp(suffix=".db", dir=None)
-    conn = sqlite3.connect(dbname,
-                           isolation_level="DEFERRED",
-                           timeout=60,
-                           check_same_thread=False  # Necessary for SQLite3 to function in multiprocessing
-                           )
-
-    cursor = conn.cursor()
-    creation_string = "CREATE TABLE dump (query_counter integer, hits blob, hsps blob)"
-    try:
-        cursor.execute("DROP TABLE IF EXISTS dump")
-        cursor.execute(creation_string)
-    except sqlite3.OperationalError:
-        # Table already exists
-        cursor.close()
-        conn.close()
-        os.remove(dbname)
-        conn = sqlite3.connect(dbname)
-        cursor = conn.cursor()
-        cursor.execute(creation_string)
-    cursor.execute("CREATE INDEX idx ON dump (query_counter)")
-    return dbname, conn, cursor
-
-
-def xml_pickler(json_conf, filename, default_header,
-                max_target_seqs=10):
+def xml_pickler(json_conf, filename,
+                default_header,
+                max_target_seqs=10) -> diskcache.Cache:
     valid, _, exc = BlastOpener(filename).sniff(default_header=default_header)
     engine = connect(json_conf, strategy="threadlocal")
     session = Session(bind=engine)
@@ -71,7 +81,9 @@ def xml_pickler(json_conf, filename, default_header,
     if not valid:
         err = "Invalid BLAST file: %s" % filename
         raise TypeError(err)
-    dbname, conn, cursor = _create_xml_db(filename)
+
+    # dbname, conn, cursor = _create_xml_db(filename)
+    dcache = diskcache.Cache(timeout=float("inf"), size_limit=2 ** 60, cull_limit=0, eviction_policy="none")
     cache = {"query": dict(), "target": dict()}
     try:
         with BlastOpener(filename) as opened:
@@ -81,16 +93,18 @@ def xml_pickler(json_conf, filename, default_header,
                         session, record, [], [], cache, max_target_seqs=max_target_seqs)
 
                     try:
-                        jhits = json.dumps(hits, number_mode=json.NM_NATIVE)
-                        jhsps = json.dumps(hsps, number_mode=json.NM_NATIVE)
+                        jhits = msgpack.dumps(json.dumps(hits, number_mode=json.NM_NATIVE))
+                        jhsps = msgpack.dumps(json.dumps(hsps, number_mode=json.NM_NATIVE))
                     except ValueError:
-                        jhits = json.dumps(hits)
-                        jhsps = json.dumps(hsps)
+                        jhits = msgpack.dumps(json.dumps(hits))
+                        jhsps = msgpack.dumps(json.dumps(hsps))
 
-                    cursor.execute("INSERT INTO dump VALUES (?, ?, ?)",
-                                   (query_counter,
-                                    jhits,
-                                    jhsps))
+                    dcache[query_counter] = (jhits, jhsps)
+
+                    # cursor.execute("INSERT INTO dump VALUES (?, ?, ?)",
+                    #                (query_counter,
+                    #                 jhits,
+                    #                 jhsps))
             except ExpatError as err:
                 # logger.error("%s is an invalid BLAST file, sending back anything salvageable", filename)
                 raise ExpatError("{} is an invalid BLAST file, sending back anything salvageable.\n{}".format(filename,
@@ -104,10 +118,7 @@ def xml_pickler(json_conf, filename, default_header,
         raise ValueError(
             "{} is an invalid BLAST file, sending back anything salvageable.\n{}".format(filename, err))
 
-    cursor.close()
-    conn.commit()
-    conn.close()
-    return dbname
+    return dcache
 
 
 class XmlSerializer:
@@ -485,30 +496,24 @@ class XmlSerializer:
                 args = (self.json_conf, filename, self.header)
                 kwds = {"max_target_seqs": self.__max_target_seqs}
                 pool.apply_async(xml_pickler, args=args, kwds=kwds, callback=results.append)
+                # results.append(xml_pickler(*args, **kwds))
             pool.close()
             pool.join()
 
             for dbfile in results:
-                conn = sqlite3.connect("file:{}?mode=ro".format(dbfile),
-                                       uri=True,  # Necessary to use the Read-only mode from file string
-                                       isolation_level="DEFERRED",
-                                       timeout=60,
-                                       check_same_thread=False  # Necessary for SQLite3 to function in multiprocessing
-                               )
-                cursor = conn.cursor()
-                for query_counter, __hits, __hsps in cursor.execute("SELECT * FROM dump"):
+                self.logger.debug("Using diskcache in directory %s", dbfile.directory)
+                for query_counter in dbfile:
+                    __hits, __hsps = dbfile[query_counter]
                     record_counter += 1
-                    __hits = json.loads(__hits)
-                    __hsps = json.loads(__hsps)
+                    __hits = json.loads(msgpack.loads(__hits, raw=False))
+                    __hsps = json.loads(msgpack.loads(__hsps, raw=False))
                     hit_counter += len(__hits)
                     hits.extend(__hits)
                     hsps.extend(__hsps)
                     hits, hsps = load_into_db(self, hits, hsps, force=False)
                     if record_counter > 0 and record_counter % 10000 == 0:
                         self.logger.debug("Parsed %d queries", record_counter)
-                cursor.close()
-                conn.close()
-                os.remove(dbfile)
+                rmtree(dbfile.directory)
 
             self.logger.debug("Finished sending off the data for serialisation")
             _, _ = self.__load_into_db(hits, hsps, force=True)
